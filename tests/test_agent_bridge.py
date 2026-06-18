@@ -5,17 +5,18 @@ import numpy as np
 import pytest
 
 import agent_bridge
-from adaptive_agent import make_probe_schedule
 
 
 # Helper to reload the bridge module between tests to reset global state
+# Tests intentionally access private attributes to verify internal state.
+# pyright: reportPrivateImportUsage=false
 @pytest.fixture(autouse=True)
 def reset_bridge():
     """Reset _global_agent before each test to avoid state leakage."""
     importlib.reload(agent_bridge)
     yield
     # Ensure clean state after test
-    agent_bridge._global_agent = None
+    agent_bridge._global_agent = None  # type: ignore[attr-defined]
 
 
 # ============================================================================
@@ -25,18 +26,18 @@ class TestMakeAgent:
     def test_live_mode_creates_agent(self):
         result = agent_bridge.make_agent(300.0, 3000.0, seed=42)
         assert result is True
-        assert agent_bridge._global_agent is not None
-        assert agent_bridge._global_agent._live
+        assert agent_bridge._global_agent is not None  # type: ignore[attr-defined]
+        assert agent_bridge._global_agent._live  # type: ignore[attr-defined]
 
     def test_non_live_mode(self):
         result = agent_bridge.make_agent(300.0, 3000.0, seed=42, live=False)
         assert result is True
-        assert agent_bridge._global_agent is not None
-        assert not agent_bridge._global_agent._live
+        assert agent_bridge._global_agent is not None  # type: ignore[attr-defined]
+        assert not agent_bridge._global_agent._live  # type: ignore[attr-defined]
 
     def test_override_kwargs(self):
         agent_bridge.make_agent(300.0, 3000.0, seed=42, gain_prior=0.50)
-        assert agent_bridge._global_agent.gain_prior == 0.50
+        assert agent_bridge._global_agent.gain_prior == 0.50  # type: ignore[attr-defined]
 
 
 # ============================================================================
@@ -46,10 +47,10 @@ class TestResetSession:
     def test_resets_block_state(self):
         agent_bridge.make_agent(300.0, 3000.0, seed=42)
         obs = np.array([500.0, 1500.0])
-        agent_bridge._global_agent._act_live(obs)
+        agent_bridge._global_agent._act_live(obs)  # type: ignore[attr-defined]
         agent_bridge.reset_session()
-        assert agent_bridge._global_agent.previous_action is None
-        assert agent_bridge._global_agent.previous_observation is None
+        assert agent_bridge._global_agent.previous_action is None  # type: ignore[attr-defined]
+        assert agent_bridge._global_agent.previous_observation is None  # type: ignore[attr-defined]
 
     def test_no_op_when_no_agent(self):
         assert agent_bridge.reset_session() is True
@@ -81,11 +82,11 @@ class TestSkipTrial:
 
     def test_simple_mode_clears_history(self):
         agent_bridge.make_agent(300.0, 3000.0, seed=42, live=False)
-        agent_bridge._global_agent.previous_action = np.array([1.0, 2.0])
-        agent_bridge._global_agent.previous_observation = np.array([3.0, 4.0])
+        agent_bridge._global_agent.previous_action = np.array([1.0, 2.0])  # type: ignore[attr-defined]
+        agent_bridge._global_agent.previous_observation = np.array([3.0, 4.0])  # type: ignore[attr-defined]
         agent_bridge.skip_trial()
-        assert agent_bridge._global_agent.previous_action is None
-        assert agent_bridge._global_agent.previous_observation is None
+        assert agent_bridge._global_agent.previous_action is None  # type: ignore[attr-defined]
+        assert agent_bridge._global_agent.previous_observation is None  # type: ignore[attr-defined]
 
     def test_no_agent(self):
         assert agent_bridge.skip_trial() is True
@@ -122,8 +123,8 @@ class TestGetMap:
         agent_bridge.make_agent(300.0, 3000.0, seed=42)
         # Run through probe phase
         obs = np.array([500.0, 1500.0])
-        calls_per_probe = agent_bridge._global_agent.hold_len + 1
-        total_calls = calls_per_probe * len(agent_bridge._global_agent.probe_schedule)
+        calls_per_probe = agent_bridge._global_agent.hold_len + 1  # type: ignore[attr-defined]
+        total_calls = calls_per_probe * len(agent_bridge._global_agent.probe_schedule)  # type: ignore[attr-defined]
         for _ in range(total_calls):
             obs = np.array(agent_bridge.act(float(obs[0]), float(obs[1])))
         result = agent_bridge.get_map()
@@ -144,8 +145,8 @@ class TestGetPhase:
         agent_bridge.make_agent(300.0, 3000.0, seed=42)
         # Exhaust probe
         obs = np.array([500.0, 1500.0])
-        calls_per_probe = agent_bridge._global_agent.hold_len + 1
-        total_calls = calls_per_probe * len(agent_bridge._global_agent.probe_schedule)
+        calls_per_probe = agent_bridge._global_agent.hold_len + 1  # type: ignore[attr-defined]
+        total_calls = calls_per_probe * len(agent_bridge._global_agent.probe_schedule)  # type: ignore[attr-defined]
         for _ in range(total_calls):
             obs = np.array(agent_bridge.act(float(obs[0]), float(obs[1])))
         assert agent_bridge.get_phase() == "control"

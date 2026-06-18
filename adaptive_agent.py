@@ -258,6 +258,7 @@ class AdaptiveGEstimatorAgent:
 
     def _start_block(self, ref_obs: np.ndarray) -> np.ndarray:
         if self.phase == "probe":
+            assert self.probe_schedule is not None
             self.block_action = self.probe_schedule[self.probe_index].copy()
         else:
             self.block_action = self._control_action(ref_obs)
@@ -312,6 +313,7 @@ class AdaptiveGEstimatorAgent:
         # Inside a hold: buffer the valid take, keep the SAME perturbation.
         self.block_observations.append(obs.copy())
         if len(self.block_observations) < self.hold_len:
+            assert self.block_action is not None
             return self.block_action.astype(np.float32)
 
         # Block complete: measure settled response to the held action.
@@ -319,9 +321,11 @@ class AdaptiveGEstimatorAgent:
         dy = settled - self.pre_block_observation
 
         if self.phase == "probe":
+            assert self.block_action is not None
             self.probe_data.append((self.block_action.copy(), dy.copy()))
             self.probe_index += 1
             self.pre_block_observation = settled.copy()
+            assert self.probe_schedule is not None
             if self.probe_index >= len(self.probe_schedule):
                 self._fit_probe()  # warm-start estimated_G_matrix from the probe, switch phases
                 self.phase = "control"
@@ -362,32 +366,35 @@ if __name__ == "__main__":
     env = PopulationSpeakerEnv(max_steps=MAX_STEPS, seed=0)
     fixed = FixedGainAgent(target=env.target, gain=BEST_FIXED_GAIN)
 
-    fixed_distance_curves, fixed_final, speaker_G_matrices = [], [], []
-    adaptive_distance_curves, adaptive_final = [], []
+    fixed_distance_curves: List[List[float]] = []
+    fixed_final_vals: List[float] = []
+    speaker_G_matrices: List[np.ndarray] = []
+    adaptive_distance_curves: List[List[float]] = []
+    adaptive_final_vals: List[float] = []
 
     # for each seed s, runs once with the fixed and once with the adaptive
     for s in speaker_seeds:
         df, G = run_episode_tracked(env, fixed, seed=s)
         fixed_distance_curves.append(df)
-        fixed_final.append(df[-1])
+        fixed_final_vals.append(df[-1])
         speaker_G_matrices.append(G)
         ad = AdaptiveGEstimatorAgent(target=env.target, seed=1000 + s)
         da, _ = run_episode_tracked(env, ad, seed=s)
         adaptive_distance_curves.append(da)
-        adaptive_final.append(da[-1])
+        adaptive_final_vals.append(da[-1])
 
-    fixed_final = np.array(fixed_final)
-    adaptive_final = np.array(adaptive_final)
+    fixed_final_arr = np.array(fixed_final_vals)
+    adaptive_final_arr = np.array(adaptive_final_vals)
 
     # Prinout/Metrics
-    speaker_G_matrices = np.array(speaker_G_matrices)
+    speaker_G_arr = np.array(speaker_G_matrices)
     cross_coupling_magnitude = np.sqrt(
-        speaker_G_matrices[:, 0, 1] ** 2 + speaker_G_matrices[:, 1, 0] ** 2
+        speaker_G_arr[:, 0, 1] ** 2 + speaker_G_arr[:, 1, 0] ** 2
     )
-    anisotropy = np.abs(-speaker_G_matrices[:, 0, 0] - (-speaker_G_matrices[:, 1, 1]))
+    anisotropy = np.abs(-speaker_G_arr[:, 0, 0] - (-speaker_G_arr[:, 1, 1]))
 
-    fixed_converged, fixed_failed = fixed_final < 15, fixed_final > 50
-    adaptive_converged, adaptive_failed = adaptive_final < 15, adaptive_final > 50
+    fixed_converged, fixed_failed = fixed_final_arr < 15, fixed_final_arr > 50
+    adaptive_converged, adaptive_failed = adaptive_final_arr < 15, adaptive_final_arr > 50
 
     print(
         f"Paired comparison on {num_speakers} identical literature-grounded speakers, "
@@ -395,13 +402,13 @@ if __name__ == "__main__":
     )
     print(
         f"  Fixed (gain {BEST_FIXED_GAIN}):  conv {100 * fixed_converged.mean():.0f}%   "
-        f"fail {100 * fixed_failed.mean():.0f}%   mean {fixed_final.mean():.1f}   "
-        f"median {np.median(fixed_final):.1f}"
+        f"fail {100 * fixed_failed.mean():.0f}%   mean {fixed_final_arr.mean():.1f}   "
+        f"median {np.median(fixed_final_arr):.1f}"
     )
     print(
         f"  Adaptive:          conv {100 * adaptive_converged.mean():.0f}%   "
-        f"fail {100 * adaptive_failed.mean():.0f}%   mean {adaptive_final.mean():.1f}   "
-        f"median {np.median(adaptive_final):.1f}"
+        f"fail {100 * adaptive_failed.mean():.0f}%   mean {adaptive_final_arr.mean():.1f}   "
+        f"median {np.median(adaptive_final_arr):.1f}"
     )
 
     speakers_rescued_by_adaptive = fixed_failed & ~adaptive_failed
@@ -410,8 +417,8 @@ if __name__ == "__main__":
     )
     if fixed_failed.sum() > 0:
         print(
-            f"  Fixed-fail tail final dist -- fixed mean {fixed_final[fixed_failed].mean():.1f}"
-            f"  vs adaptive mean {adaptive_final[fixed_failed].mean():.1f}"
+            f"  Fixed-fail tail final dist -- fixed mean {fixed_final_arr[fixed_failed].mean():.1f}"
+            f"  vs adaptive mean {adaptive_final_arr[fixed_failed].mean():.1f}"
         )
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
@@ -440,15 +447,15 @@ if __name__ == "__main__":
     ax1.legend(loc="best")
 
     scatter_collection = ax2.scatter(
-        fixed_final,
-        adaptive_final,
+        fixed_final_arr,
+        adaptive_final_arr,
         c=anisotropy,
         cmap="viridis",
         s=70,
         edgecolor="black",
         lw=0.5,
     )
-    axis_limit = max(fixed_final.max(), adaptive_final.max(), 50) * 1.05
+    axis_limit = max(fixed_final_arr.max(), adaptive_final_arr.max(), 50) * 1.05
     ax2.plot([0, axis_limit], [0, axis_limit], "k--", lw=0.8)
     ax2.axhline(15, color="gray", lw=0.5)
     ax2.axvline(50, color="gray", lw=0.5)
@@ -458,10 +465,10 @@ if __name__ == "__main__":
     ax2.set_ylabel("Adaptive-agent final distance")
     ax2.set_title("Per-speaker: points below diagonal = adaptive wins")
     ax2.grid(alpha=0.3)
-    fig.colorbar(
+    fig.colorbar(  # type: ignore[unknown-member]
         scatter_collection, ax=ax2, label="gain anisotropy |k$_{F1}$-k$_{F2}$|"
     )
 
     fig.tight_layout()
-    fig.savefig("adaptive_vs_fixed.png", dpi=150)
+    fig.savefig("adaptive_vs_fixed.png", dpi=150)  # type: ignore[unknown-member]
     print("\nWrote: adaptive_vs_fixed.png")

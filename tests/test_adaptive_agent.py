@@ -1,5 +1,14 @@
 """Tests for adaptive_agent.py — AdaptiveGEstimatorAgent and make_probe_schedule."""
 
+# Tests intentionally access protected attributes (_live) and use pytest fixtures
+# whose return types Pylance cannot infer from conftest.py.
+# pyright: reportPrivateUsage=false
+# pyright: reportUnknownParameterType=false
+# pyright: reportUnknownVariableType=false
+# pyright: reportUnknownMemberType=false
+# pyright: reportUnknownArgumentType=false
+# pyright: reportMissingParameterType=false
+
 import numpy as np
 import pytest
 
@@ -253,7 +262,7 @@ class TestFitProbe:
 # ============================================================================
 class TestActLive:
     def test_first_call_sets_baseline(self, live_agent, baseline_obs):
-        action = live_agent._act_live(baseline_obs)
+        live_agent._act_live(baseline_obs)
         np.testing.assert_array_almost_equal(live_agent.baseline_observation, baseline_obs)
         assert live_agent.pre_block_observation is not None
 
@@ -294,7 +303,6 @@ class TestActLive:
         for _ in range(total_calls):
             obs = live_agent._act_live(obs)
         # Now in control phase — one more block should trigger RLS
-        old_estimate = live_agent.estimated_G_matrix.copy()
         for _ in range(live_agent.hold_len + 1):
             obs = live_agent._act_live(obs)
         # Estimate should have been updated
