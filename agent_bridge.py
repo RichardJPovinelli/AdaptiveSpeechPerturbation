@@ -1,7 +1,7 @@
 """
 agent_bridge.py
 ===============
-Thin bridge so MATLAB (AdaptationRun.m) can drive the Python AdaptiveGEstimatorAgent
+Thin bridge so MATLAB (AdaptationRun.m) can drive the Python AdaptiveAgent
 between trials. MATLAB calls these module-level functions via the py.* interface.
 
 The interface deliberately uses plain scalars / lists (no numpy objects cross the
@@ -22,14 +22,21 @@ the held trials. See LIVE_KWARGS below to tune or disable.
 Place this file wherever MATLAB will add it to py.sys.path (AGENT_BRIDGE_DIR in the
 .m file). It adds AGENT_CODE_DIR (your existing Python sim folder) to sys.path so
 adaptive_agent.py is importable.
+
+FUNCTIONAL REFACTOR
+-------------------
+The bridge now uses an immutable BridgeContext dataclass instead of a mutable
+global _global_agent.  make_agent() replaces the entire context reference rather
+than mutating a shared agent in place.
 """
 
 import sys
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from adaptive_agent import AdaptiveGEstimatorAgent, make_probe_schedule
+from adaptive_agent import AdaptiveAgent, AdaptiveGEstimatorAgent, make_probe_schedule
 
 # Folder that contains adaptive_agent.py, population_sim.py, skeleton_loop.py.
 AGENT_CODE_DIR = r"C:\Users\mitti\Downloads"
@@ -38,13 +45,16 @@ if AGENT_CODE_DIR not in sys.path:
 
 _global_agent: Optional[AdaptiveGEstimatorAgent] = None
 
+@dataclass(frozen=True)
+class BridgeContext:
+    """Immutable reference to the current agent held by the bridge."""
+    agent: Optional[AdaptiveAgent] = None
+
+
+# Module-level context — replaced (not mutated) by make_agent()
+_context: Optional[BridgeContext] = None
+
 # ---- live-session defaults (tune here) -----------------------------------------
-# HOLD_LEN: trials each perturbation is held so slow compensation can build before we
-#   read it. PROBE_AXES/PROBE_AMP: the opening per-speaker identification block.
-#   K_CLAMP: (min,max) physiological gain; the positive floor keeps the inverse
-#   controller stable (a near-zero k would otherwise demand an enormous action).
-#   Set min negative (e.g. -0.20) if you explicitly want to model followers, but
-#   expect noisier control near k=0.
 LIVE_KWARGS: Dict[str, Any] = dict(
     diagonal_only=True,
     k_clamp=(0.05, 0.70),
@@ -68,7 +78,7 @@ def make_agent(
 ) -> bool:
     """Create the live agent. Pass keyword overrides to change any LIVE_KWARGS
     (or set live=False for the original per-trial behavior)."""
-    global _global_agent
+    global _context
     agent_config = dict(LIVE_KWARGS)
     agent_config.update(overrides)
 
@@ -76,7 +86,7 @@ def make_agent(
         probe = make_probe_schedule(
             agent_config.pop("probe_amp", 80.0), agent_config.pop("probe_axes", 2)
         )
-        _global_agent = AdaptiveGEstimatorAgent(
+        agent = AdaptiveGEstimatorAgent(
             target=[float(target_f1), float(target_f2)],
             seed=int(seed),
             diagonal_only=agent_config.get("diagonal_only", True),
@@ -90,27 +100,23 @@ def make_agent(
         )
     else:
         # original single-trial agent (no probe / hold / clamp)
-        _global_agent = AdaptiveGEstimatorAgent(
+        agent = AdaptiveGEstimatorAgent(
             target=[float(target_f1), float(target_f2)],
             gain_prior=agent_config.get("gain_prior", 0.28),
             lam=agent_config.get("lam", 0.99),
             explore0=agent_config.get("explore0", 20.0),
             seed=int(seed),
         )
+    _context = BridgeContext(agent=agent)
     return True
 
 
 def reset_session() -> bool:
     """Start a session. Keeps the learned estimate / probe map (warm start across
     sessions); clears only the within-session bookkeeping."""
-    global _global_agent
-    if _global_agent is None:
+    if _context is None or _context.agent is None:
         return True
-    if hasattr(_global_agent, "reset_block_state"):
-        _global_agent.reset_block_state(keep_estimate=True)
-    # also clear the simple-path history (harmless for live agents)
-    _global_agent.previous_action = None
-    _global_agent.previous_observation = None
+    _context.agent.reset_block_state(keep_estimate=True)
     return True
 
 
@@ -119,10 +125,9 @@ def act(obs_f1: float, obs_f2: float) -> List[float]:
 
     Returns [dF1, dF2] in Hz as a plain Python list. During a hold the SAME action
     is returned for several trials by design -- apply whatever comes back."""
-    global _global_agent
-    if _global_agent is None:
+    if _context is None or _context.agent is None:
         raise RuntimeError("agent_bridge.make_agent(...) must be called first")
-    action_result = _global_agent.act(
+    action_result = _context.agent.act(
         np.array([float(obs_f1), float(obs_f2)], dtype=float)
     )
     return [float(action_result[0]), float(action_result[1])]
@@ -133,29 +138,26 @@ def skip_trial() -> bool:
 
     Live mode: act() is only ever called with valid takes, so the held perturbation
     simply persists and the block waits for the next valid take -- nothing to undo.
-    Simple mode: invalidate the pending one-step pairing (keeps the learned estimated_G_matrix)."""
-    global _global_agent
-    if _global_agent is None:
+    Simple mode: invalidate the pending one-step pairing (keeps the learned estimate)."""
+    if _context is None or _context.agent is None:
         return True
-    if getattr(_global_agent, "_live", False):
+    if _context.agent.live:
         return True  # holds tolerate a missing take with no action needed
-    _global_agent.previous_action = None
-    _global_agent.previous_observation = None
+    _context.agent.reset_block_state(keep_estimate=True)
     return True
 
 
 def get_estimate() -> List[float]:
     """Return [k_F1, k_F2, cross_F1<-F2, cross_F2<-F1] from the current estimated_G_matrix.
     AdaptationRun.m logs this each trial; diagonal mode reports ~0 cross terms."""
-    global _global_agent
-    if _global_agent is None:
+    if _context is None or _context.agent is None:
         return [0.0, 0.0, 0.0, 0.0]
-    G_estimate = _global_agent.estimated_G_matrix
+    G = _context.agent.estimated_G_matrix
     return [
-        float(-G_estimate[0, 0]),
-        float(-G_estimate[1, 1]),
-        float(G_estimate[0, 1]),
-        float(G_estimate[1, 0]),
+        float(-G[0, 0]),
+        float(-G[1, 1]),
+        float(G[0, 1]),
+        float(G[1, 0]),
     ]
 
 
@@ -163,12 +165,9 @@ def get_map() -> List[float]:
     """Return the per-speaker map identified by the probe, as a plain dict-like
     list [baseline_f1, baseline_f2, k_f1, k_f2], or zeros if the probe hasn't run.
     This is the hook for normalizing targets into per-speaker space."""
-    global _global_agent
-    speaker_map = (
-        getattr(_global_agent, "speaker_map", None)
-        if _global_agent is not None
-        else None
-    )
+    if _context is None or _context.agent is None:
+        return [0.0, 0.0, 0.0, 0.0]
+    speaker_map = _context.agent.speaker_map
     if not speaker_map:
         return [0.0, 0.0, 0.0, 0.0]
     baseline = speaker_map["baseline"]
@@ -178,9 +177,6 @@ def get_map() -> List[float]:
 
 def get_phase() -> str:
     """'probe' or 'control' -- useful for on-screen status during a live run."""
-    global _global_agent
-    return (
-        getattr(_global_agent, "phase", "control")
-        if _global_agent is not None
-        else "control"
-    )
+    if _context is None or _context.agent is None:
+        return "control"
+    return _context.agent.phase
