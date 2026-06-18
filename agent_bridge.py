@@ -25,16 +25,18 @@ adaptive_agent.py is importable.
 """
 
 import sys
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+
+from adaptive_agent import AdaptiveGEstimatorAgent, make_probe_schedule
 
 # Folder that contains adaptive_agent.py, population_sim.py, skeleton_loop.py.
 AGENT_CODE_DIR = r"C:\Users\mitti\Downloads"
 if AGENT_CODE_DIR not in sys.path:
     sys.path.insert(0, AGENT_CODE_DIR)
 
-import numpy as np
-from adaptive_agent import AdaptiveGEstimatorAgent, make_probe_schedule
-
-_agent = None
+_global_agent: Optional[AdaptiveGEstimatorAgent] = None
 
 # ---- live-session defaults (tune here) -----------------------------------------
 # HOLD_LEN: trials each perturbation is held so slow compensation can build before we
@@ -43,13 +45,13 @@ _agent = None
 #   controller stable (a near-zero k would otherwise demand an enormous action).
 #   Set min negative (e.g. -0.20) if you explicitly want to model followers, but
 #   expect noisier control near k=0.
-LIVE_KWARGS = dict(
+LIVE_KWARGS: Dict[str, Any] = dict(
     diagonal_only=True,
     k_clamp=(0.05, 0.70),
     hold_len=4,
-    settle_window=2,          # average the last 2 takes of each hold as "settled"
+    settle_window=2,  # average the last 2 takes of each hold as "settled"
     probe_amp=80.0,
-    probe_axes=2,             # [(+P,0),(0,+P)]; 4 adds the negative pair (more trials)
+    probe_axes=2,  # [(+P,0),(0,+P)]; 4 adds the negative pair (more trials)
     explore0=0.0,
     lam=0.99,
     gain_prior=0.28,
@@ -61,105 +63,124 @@ LIVE_KWARGS = dict(
 # --------------------------------------------------------------------------------
 
 
-def make_agent(target_f1, target_f2, seed=0, **overrides):
+def make_agent(
+    target_f1: float, target_f2: float, seed: int = 0, **overrides: Any
+) -> bool:
     """Create the live agent. Pass keyword overrides to change any LIVE_KWARGS
     (or set live=False for the original per-trial behavior)."""
-    global _agent
-    cfg = dict(LIVE_KWARGS)
-    cfg.update(overrides)
+    global _global_agent
+    agent_config = dict(LIVE_KWARGS)
+    agent_config.update(overrides)
 
-    if cfg.pop("live", True):
-        probe = make_probe_schedule(cfg.pop("probe_amp", 80.0),
-                                    cfg.pop("probe_axes", 2))
-        _agent = AdaptiveGEstimatorAgent(
+    if agent_config.pop("live", True):
+        probe = make_probe_schedule(
+            agent_config.pop("probe_amp", 80.0), agent_config.pop("probe_axes", 2)
+        )
+        _global_agent = AdaptiveGEstimatorAgent(
             target=[float(target_f1), float(target_f2)],
             seed=int(seed),
-            diagonal_only=cfg.get("diagonal_only", True),
-            k_clamp=cfg.get("k_clamp", (0.05, 0.70)),
-            hold_len=cfg.get("hold_len", 4),
-            settle_window=cfg.get("settle_window", 2),
+            diagonal_only=agent_config.get("diagonal_only", True),
+            k_clamp=agent_config.get("k_clamp", (0.05, 0.70)),
+            hold_len=agent_config.get("hold_len", 4),
+            settle_window=agent_config.get("settle_window", 2),
             probe_schedule=probe,
-            explore0=cfg.get("explore0", 0.0),
-            lam=cfg.get("lam", 0.99),
-            gain_prior=cfg.get("gain_prior", 0.28),
+            explore0=agent_config.get("explore0", 0.0),
+            lam=agent_config.get("lam", 0.99),
+            gain_prior=agent_config.get("gain_prior", 0.28),
         )
     else:
         # original single-trial agent (no probe / hold / clamp)
-        _agent = AdaptiveGEstimatorAgent(
+        _global_agent = AdaptiveGEstimatorAgent(
             target=[float(target_f1), float(target_f2)],
-            gain_prior=cfg.get("gain_prior", 0.28),
-            lam=cfg.get("lam", 0.99),
-            explore0=cfg.get("explore0", 20.0),
+            gain_prior=agent_config.get("gain_prior", 0.28),
+            lam=agent_config.get("lam", 0.99),
+            explore0=agent_config.get("explore0", 20.0),
             seed=int(seed),
         )
     return True
 
 
-def reset_session():
+def reset_session() -> bool:
     """Start a session. Keeps the learned estimate / probe map (warm start across
     sessions); clears only the within-session bookkeeping."""
-    global _agent
-    if _agent is None:
+    global _global_agent
+    if _global_agent is None:
         return True
-    if hasattr(_agent, "reset_block_state"):
-        _agent.reset_block_state(keep_estimate=True)
+    if hasattr(_global_agent, "reset_block_state"):
+        _global_agent.reset_block_state(keep_estimate=True)
     # also clear the simple-path history (harmless for live agents)
-    _agent.prev_a = None
-    _agent.prev_obs = None
+    _global_agent.previous_action = None
+    _global_agent.previous_observation = None
     return True
 
 
-def act(obs_f1, obs_f2):
+def act(obs_f1: float, obs_f2: float) -> List[float]:
     """Feed the measured mid-vowel formants in; get the next perturbation back.
 
     Returns [dF1, dF2] in Hz as a plain Python list. During a hold the SAME action
     is returned for several trials by design -- apply whatever comes back."""
-    global _agent
-    if _agent is None:
+    global _global_agent
+    if _global_agent is None:
         raise RuntimeError("agent_bridge.make_agent(...) must be called first")
-    a = _agent.act(np.array([float(obs_f1), float(obs_f2)], dtype=float))
-    return [float(a[0]), float(a[1])]
+    action_result = _global_agent.act(
+        np.array([float(obs_f1), float(obs_f2)], dtype=float)
+    )
+    return [float(action_result[0]), float(action_result[1])]
 
 
-def skip_trial():
+def skip_trial() -> bool:
     """Call on a trial where NO valid vowel was detected.
 
     Live mode: act() is only ever called with valid takes, so the held perturbation
     simply persists and the block waits for the next valid take -- nothing to undo.
-    Simple mode: invalidate the pending one-step pairing (keeps the learned W)."""
-    global _agent
-    if _agent is None:
+    Simple mode: invalidate the pending one-step pairing (keeps the learned estimated_G_matrix)."""
+    global _global_agent
+    if _global_agent is None:
         return True
-    if getattr(_agent, "_live", False):
+    if getattr(_global_agent, "_live", False):
         return True  # holds tolerate a missing take with no action needed
-    _agent.prev_a = None
-    _agent.prev_obs = None
+    _global_agent.previous_action = None
+    _global_agent.previous_observation = None
     return True
 
 
-def get_estimate():
-    """Return [k_F1, k_F2, cross_F1<-F2, cross_F2<-F1] from the current W.
+def get_estimate() -> List[float]:
+    """Return [k_F1, k_F2, cross_F1<-F2, cross_F2<-F1] from the current estimated_G_matrix.
     AdaptationRun.m logs this each trial; diagonal mode reports ~0 cross terms."""
-    global _agent
-    if _agent is None:
+    global _global_agent
+    if _global_agent is None:
         return [0.0, 0.0, 0.0, 0.0]
-    W = _agent.W
-    return [float(-W[0, 0]), float(-W[1, 1]), float(W[0, 1]), float(W[1, 0])]
+    G_estimate = _global_agent.estimated_G_matrix
+    return [
+        float(-G_estimate[0, 0]),
+        float(-G_estimate[1, 1]),
+        float(G_estimate[0, 1]),
+        float(G_estimate[1, 0]),
+    ]
 
 
-def get_map():
+def get_map() -> List[float]:
     """Return the per-speaker map identified by the probe, as a plain dict-like
     list [baseline_f1, baseline_f2, k_f1, k_f2], or zeros if the probe hasn't run.
     This is the hook for normalizing targets into per-speaker space."""
-    global _agent
-    m = getattr(_agent, "speaker_map", None) if _agent is not None else None
-    if not m:
+    global _global_agent
+    speaker_map = (
+        getattr(_global_agent, "speaker_map", None)
+        if _global_agent is not None
+        else None
+    )
+    if not speaker_map:
         return [0.0, 0.0, 0.0, 0.0]
-    b = m["baseline"]; k = m["k"]
-    return [float(b[0]), float(b[1]), float(k[0]), float(k[1])]
+    baseline = speaker_map["baseline"]
+    gains = speaker_map["k"]
+    return [float(baseline[0]), float(baseline[1]), float(gains[0]), float(gains[1])]
 
 
-def get_phase():
+def get_phase() -> str:
     """'probe' or 'control' -- useful for on-screen status during a live run."""
-    global _agent
-    return getattr(_agent, "phase", "control") if _agent is not None else "control"
+    global _global_agent
+    return (
+        getattr(_global_agent, "phase", "control")
+        if _global_agent is not None
+        else "control"
+    )
